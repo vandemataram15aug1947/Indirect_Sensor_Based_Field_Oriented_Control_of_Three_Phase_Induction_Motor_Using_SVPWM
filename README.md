@@ -123,6 +123,7 @@ FOC is a control method that allows decoupled torque and flux control in AC moto
 - This information is fed into the Park transform to rotate the d-q frame.
 
 ### 4.3 Code Implementation
+
 #### Global Variables
 ```c
 float i_alpha, i_beta;  // Alpha-beta current components
@@ -145,18 +146,18 @@ float encoder_read() {
 ```c
 void clarke_transform(float i_a, float i_b, float i_c) {
     i_alpha = i_a;
-    i_beta = (i_a + 2 * i_b) / sqrt(3);
+    i_beta = (i_a + 2.0f * i_b) / sqrtf(3.0f);
 }
 ```
 
 #### Park Transform (αβ → dq)
 ```c
 void park_transform(float theta) {
-    float sin_theta = sin(theta);
-    float cos_theta = cos(theta);
+    float sin_theta = sinf(theta);
+    float cos_theta = cosf(theta);
     
-    i_d = i_alpha * cos(theta) + i_beta * sin(theta);
-    i_q = -i_alpha * sin(theta) + i_beta * cos(theta);
+    i_d = i_alpha * cos_theta + i_beta * sin_theta;
+    i_q = -i_alpha * sin_theta + i_beta * cos_theta;
 }
 ```
 
@@ -165,11 +166,10 @@ void park_transform(float theta) {
 void speed_control(float omega_actual) {
     static float integral = 0;
     float error = omega_ref - omega_actual;
-    float Kp = 0.01, Ki = 0.005;
+    float Kp = 0.01f, Ki = 0.005f;
     
     integral += error * Ki;
-    if (integral > 1.0) integral = 1.0;
-    if (integral < -1.0) integral = -1.0;
+    integral = fminf(fmaxf(integral, -1.0f), 1.0f);
     
     v_q = (Kp * error) + integral;
 }
@@ -178,18 +178,73 @@ void speed_control(float omega_actual) {
 #### Inverse Park Transform (dq → αβ)
 ```c
 void inverse_park_transform(float theta) {
-    v_alpha = v_d * cos(theta) - v_q * sin(theta);
-    v_beta = v_q * cos(theta) + v_d * sin(theta);
+    float sin_theta = sinf(theta);
+    float cos_theta = cosf(theta);
+    
+    v_alpha = v_d * cos_theta - v_q * sin_theta;
+    v_beta = v_q * cos_theta + v_d * sin_theta;
 }
 ```
 
-#### Space Vector PWM (SVPWM)
+#### SVPWM Generation
 ```c
-void space_vector_pwm(float v_alpha, float v_beta) {
-    float v_ref = sqrt(v_alpha * v_alpha + v_beta * v_beta);
-    float angle = atan2(v_beta, v_alpha);
-    float sector = (angle / M_PI) * 3.0;
-    compute_pwm_duty_cycle(v_alpha, v_beta);
+#include "driverlib.h"
+
+void generate_svpwm_pulses(float v_alpha, float v_beta) {
+    float v_ref = sqrtf(v_alpha * v_alpha + v_beta * v_beta);
+    float angle = atan2f(v_beta, v_alpha);
+    int sector_num = ((int)((angle / M_PI) * 3.0f)) % 6;
+    
+    float t1, t2, t0;
+    float sqrt3 = sqrtf(3.0f);
+    
+    switch (sector_num) {
+        case 0:
+            t1 = sqrt3 * v_ref * sinf(M_PI / 3.0f - angle);
+            t2 = sqrt3 * v_ref * sinf(angle);
+            break;
+        case 1:
+            t1 = sqrt3 * v_ref * sinf(angle - M_PI / 3.0f);
+            t2 = sqrt3 * v_ref * sinf(2 * M_PI / 3.0f - angle);
+            break;
+        case 2:
+            t1 = sqrt3 * v_ref * sinf(2 * M_PI / 3.0f - angle);
+            t2 = sqrt3 * v_ref * sinf(angle - M_PI);
+            break;
+        case 3:
+            t1 = sqrt3 * v_ref * sinf(angle - M_PI);
+            t2 = sqrt3 * v_ref * sinf(4 * M_PI / 3.0f - angle);
+            break;
+        case 4:
+            t1 = sqrt3 * v_ref * sinf(4 * M_PI / 3.0f - angle);
+            t2 = sqrt3 * v_ref * sinf(angle - 5 * M_PI / 3.0f);
+            break;
+        case 5:
+            t1 = sqrt3 * v_ref * sinf(angle - 5 * M_PI / 3.0f);
+            t2 = sqrt3 * v_ref * sinf(2 * M_PI - angle);
+            break;
+    }
+    
+    t0 = 1.0f - t1 - t2;
+    
+    PWM_setDutyCycle(PWM1_BASE, PWM_OUT_1, t1);
+    PWM_setDutyCycle(PWM1_BASE, PWM_OUT_2, t2);
+    PWM_setDutyCycle(PWM1_BASE, PWM_OUT_3, t0);
+}
+```
+
+#### Main Loop
+```c
+int main() {
+    encoder_init();
+    
+    while (1) {
+        theta = encoder_read();
+        park_transform(theta);
+        speed_control(omega_actual);
+        inverse_park_transform(theta);
+        space_vector_pwm(v_alpha, v_beta);
+    }
 }
 ```
 
